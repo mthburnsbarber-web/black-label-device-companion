@@ -79,6 +79,22 @@ test('native write failure after clipboard empty is never reported as a simple d
   } finally { await r.close(); }
 });
 
+test('pausing after received ACK prevents a queued native clipboard write', async () => {
+  const r = await rig('harmless');
+  try {
+    const original = r.b.send.bind(r.b);
+    r.b.send = async message => {
+      if (message.state === 'received') { r.laptop.stop(); return; }
+      return original(message);
+    };
+    await assert.rejects(r.mini.sendClipboard('laptop', { consent: true, requestId: 'paused-test' }));
+    assert.equal(r.target.writes, 0);
+    assert.equal(r.target.snapshot().text, 'prior');
+    const persisted = JSON.parse(await readFile(join(r.dir, 'laptop.json'), 'utf8'));
+    assert.equal(persisted.receipts['paused-test'].state, 'paused');
+  } finally { await r.close(); }
+});
+
 test('explicit consent and stop gate all operations', async () => {
   const r = await rig();
   try {

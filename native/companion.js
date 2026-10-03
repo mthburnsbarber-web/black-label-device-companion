@@ -3,7 +3,7 @@ import { MAX_BYTES, MIME, validatePayload } from '../core.js';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = code => Object.assign(new Error(code), { code });
-const terminal = new Set(['verified', 'verification_failed', 'concurrent_change', 'permission_denied', 'expired', 'invalid_payload', 'ambiguous_after_restart']);
+const terminal = new Set(['verified', 'verification_failed', 'concurrent_change', 'permission_denied', 'expired', 'invalid_payload', 'ambiguous_after_restart', 'paused']);
 
 // The client must deliver {authenticatedPeerId,message} only after paired-key
 // authentication and decryption. The in-memory test relay is NOT that provider.
@@ -88,6 +88,7 @@ export class NativeCompanion {
     await this.queue;
   }
   async handleInbound(peerId, message) {
+    if (!this.enabled) return;
     if (message.sourceDeviceId !== peerId || message.targetDeviceId !== this.deviceId) return;
     if (message.type === 'prepare') {
       const snapshot = await this.clipboard.snapshot();
@@ -116,6 +117,7 @@ export class NativeCompanion {
     try { text = validatePayload(bytes, e); } catch { await this.sendTerminal(e, 'invalid_payload'); return; }
     await this.state.update(next => { next.inbound[e.id] = { sourceDeviceId: peerId, sequence: e.sequence, sha256: e.sha256 }; next.lastSequence[peerId] = e.sequence; });
     await this.client.send({ type: 'receipt', id: e.id, sourceDeviceId: peerId, targetDeviceId: this.deviceId, state: 'received', byteLength: e.byteLength });
+    if (!this.enabled) { await this.sendTerminal(e, 'paused').catch(() => {}); return; }
     try {
       const revision = await this.clipboard.compareAndWrite(e.targetRevision, text, { transferId: e.id, sourceDeviceId: peerId });
       await this.client.send({ type: 'receipt', id: e.id, sourceDeviceId: peerId, targetDeviceId: this.deviceId, state: 'applied', byteLength: e.byteLength });
