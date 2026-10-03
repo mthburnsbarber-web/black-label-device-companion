@@ -1,0 +1,49 @@
+# Black Label device control core: isolated prototype
+
+This is an isolated clipboard integrity core plus **disabled-by-default macOS adapter and outbound client code**, not an installed or paired companion. Running the demo and tests neither accesses an OS clipboard nor connects to another computer, Cloudflare, Deskflow, or the dashboard. No network listener, account credential, pairing key, or operating system permission is created. The dashboard at `../task-2` was read for its current disconnected device and clipboard validation shape; it was not edited.
+
+Run with Node 24 or later:
+
+```sh
+npm test
+npm run demo
+npm run demo:companion
+```
+
+`core.js` provides explicit device identities, monotonic source sequence numbers, transfer IDs, bounded retries, deduplication after lost ACKs, size/MIME/UTF-8/SHA-256 checks, a 30 second transfer expiry, consent and pause gates, clipboard revision compare-and-write, target readback, and metadata-only audit records. A target-origin marker prevents forwarding the same received clipboard entry back. The core's runnable test path uses only `MockClipboard` and `LoopbackTransport`. The example prints **mock** text; never supply real clipboard content to it.
+
+`native/macos.js` wraps the AppKit `NSPasteboard` helper in `native/macos_clipboard.swift`. Import or construction does nothing. It needs an explicit `activate({consent:true})` call before any subprocess access; `pause()` disables it. Reads return UTF-8 text and `changeCount`; writes pass text through stdin and check the expected count, then report the new count. Node computes SHA-256 and can check a post-write readback. This OS count check reduces stale writes but AppKit does not offer an atomic compare-and-swap: another process could race between check and write. The recipient must surface that uncertainty and reconcile subsequent changes. No keyboard/mouse input code is present.
+
+`native/companion.js` now assembles a clipboard adapter, an outbound client, and restart-persistent receipt/sequence metadata (`native/state.js`). It asks the target for its revision, sends one bounded UTF-8 text transfer, awaits a terminal target receipt, and retries the **same** ID at most three times. The recipient persists an in-progress marker before writing; if interrupted before a terminal receipt, a replay returns `ambiguous_after_restart` instead of writing again. State files exclude clipboard content, ciphertext, credentials, and keys. `npm run demo:companion` exercises this complete flow over an **in-process mock relay** only.
+
+`native/outbound.js` requires explicit `start({consent:true})`, a `wss:` relay URL, an externally supplied pairing authorization provider, and externally supplied authenticated encryption/decryption functions. It sends only encrypted application frames after the server authenticates the device. `stop()` closes the connection; the companion exposes an explicit `reconnect()` path. It does **not** implement pairing, cryptography, or a Cloudflare endpoint. Real `MacOSClipboard` and `OutboundCompanionClient` can be injected into `NativeCompanion`, but that combination was **not run**; the real Cloudflare contract is still absent. Windows and Linux native adapters are **unsupported** in this build.
+
+To enable an actual Mac mini trial, the user must approve a signed companion build, its clipboard read/write access under macOS privacy behavior, an exact Cloudflare relay endpoint, per-device pairing and revocation, storage for device keys and durable receipts, retention rules, and a single named test device. The Cloudflare task must provide the account authorization and key enrollment contract, outbound `wss:` relay message schema, authenticated ACK routing, expiry behavior, and a way to query a transfer by ID after reconnection. Only then can the native adapter and client be assembled and run against real devices. Neither Accessibility nor Input Monitoring permission is needed for text clipboard alone; separate keyboard/mouse control would require explicit user-granted OS permission and native implementation.
+
+## Status semantics and limits
+
+`received` means the destination validated the full bytes and identity. `applied` means its mock clipboard accepted a revision-checked write. `verified` means the destination read the same revision and bytes back, matching SHA-256. A source change during delivery is reported as `source_changed_during_delivery`; its destination may already have applied, so the UI must not show an unconditional failure or blindly retry as a new request. A lost final ACK is retried with the *same* transfer ID and sequence, and the destination returns its stored receipt without a second write. An offline destination cannot return `applied` or `verified`, even when the cloud dashboard remains online.
+
+The earlier `core.js` mock controller keeps receipts and counters in memory. The assembled companion persists metadata with atomic file replacement and serializes its per-device receipt writes. Before a production launch, the state file needs power-loss durability review, secure location ownership, and a one-process lock; an ambiguous restart requires manual reconciliation or an authenticated query. Actual recipient verification reads `NSPasteboard` again after write, requires the returned `changeCount` to equal the write result, and compares the byte count and SHA-256 of the returned UTF-8 bytes. Only receipt metadata goes to the dashboard; clipboard text stays in the companion and encrypted device channel. OS clipboard APIs can change after verification; the UI should show the verified time and any subsequent observed change. The original mock controller's `Promise.race` timeout does not cancel an in-flight asynchronous adapter. A receiver must never treat a timeout as proof that an apply did not happen.
+
+See [PROTOCOL.md](PROTOCOL.md) for the Cloudflare dashboard integration and staged native design.
+
+## Platform scope and evidence
+
+| Platform | Plausible native capability | Important boundary |
+| --- | --- | --- |
+| macOS | A signed native companion can use `NSPasteboard` and its `changeCount` to detect ownership changes. Accessibility trusted-client status can be checked before any future input control. | Pasteboard access behavior can ask or deny access. Input control requires user-granted Accessibility; this prototype does not request it. [Apple pasteboard change count](https://developer.apple.com/documentation/appkit/nspasteboard/changecount), [Apple pasteboard access behavior](https://developer.apple.com/documentation/appkit/nspasteboard/accessbehavior-swift.enum), [Apple trusted accessibility client](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions). |
+| Windows | A native process can inspect the clipboard sequence number for changes. | `SendInput` is subject to User Interface Privilege Isolation and cannot inject into higher-integrity apps. This prototype has no input injection. [Microsoft clipboard sequence](https://learn.microsoft.com/en-us/windows/win32/dataxchg/using-the-clipboard), [Microsoft SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput). |
+| Linux X11 / Wayland | Native clipboard integration differs by session. For Wayland input capture and remote desktop, portal and compositor support matter. | Wayland capability varies across desktop and portal versions; do not infer full control from a Linux label. [XDG RemoteDesktop portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html), [Deskflow known Wayland issues](https://github.com/deskflow/deskflow/discussions/7499). |
+| iOS / Android browser | A foreground web page can request browser clipboard access under browser rules. | It cannot provide reliable background global clipboard or OS-wide keyboard/mouse control. Permissions, activation, focus, and browser differences apply. A scoped native mobile app would need separate OS review and user consent. [MDN Clipboard API security](https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API#security_considerations). |
+
+For keyboard/mouse sharing, favor evaluating the maintained [Deskflow project](https://github.com/deskflow/deskflow) rather than writing a new input engine. Its upstream describes Windows/macOS/Linux support, TLS by default, clipboard sharing, Wayland caveats, and a **GPL-2.0 license with OpenSSL exception**. Integration or distribution requires license review. Its upstream describes Input Leap as inactive, and [Input Leap's repository is archived](https://github.com/input-leap/input-leap). This prototype does not install, alter, or repair either project.
+
+## Next gated hardware work
+
+1. Review and approve the Cloudflare architecture, data retention, device inventory, pairing UX, and a privacy threat model. Choose a device-native implementation per OS and review its license.
+2. Implement signed native companions with a revocable per-device key, OS permission prompts, outbound-only authenticated connection, and durable receipt/replay storage. Keep clipboard data end-to-end encrypted and off dashboard logs.
+3. Pair one test device at a time with explicit user approval. Verify local permission denial, revocation, disconnected and restarted companions, target readback, and cloud outages before adding more devices.
+4. Only after those tests, connect the dashboard Devices UI to the versioned control/status API. Label offline, pending, received, applied, verified, and ambiguous outcomes distinctly.
+
+The current reported paste failure (`s`) is being handled separately. These mock tests do not establish its root cause or fix it on real devices.
