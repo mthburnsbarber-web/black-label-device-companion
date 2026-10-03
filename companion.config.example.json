@@ -1,0 +1,11 @@
+{
+  "deviceId": "device-mini",
+  "relayUrl": "https://replace-with-approved-device-relay.example/v1",
+  "pairedDeviceIds": ["device-laptop"],
+  "statePath": "/absolute/private/path/black-label-device-state.json",
+  "keychain": {
+    "clientIdService": "blacklabel-device-mini-client-id",
+    "clientSecretService": "blacklabel-device-mini-client-secret",
+    "pairKeyPrefix": "blacklabel-device-pair-"
+  }
+}
