@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
-import { MacOSClipboard } from '../native/macos.js';
+import { MacOSClipboard, compiledMacRunner } from '../native/macos.js';
 import { HttpRelayClient } from '../native/http_relay.js';
 import { PairwiseAeadCodec } from '../native/aead_codec.js';
 import { KeychainProvider } from '../native/keychain.js';
@@ -27,7 +27,7 @@ if (!['--check', '--start', '--enroll', '--pair-check'].includes(mode) || !confi
   const config = validate(JSON.parse(await readFile(configPath, 'utf8')));
   if (process.platform !== 'darwin') throw new Error('This build supports macOS only');
   if (mode === '--check') {
-    console.log(JSON.stringify({ configValid: true, deviceId: config.deviceId, relay: new URL(config.relayUrl).origin, pairedDevices: config.pairedDeviceIds.length, enrollmentVerified: false, hardwareVerified: false, clipboardAccessed: false, keychainAccessed: false }));
+    console.log(JSON.stringify({ configValid: true, deviceId: config.deviceId, relay: new URL(config.relayUrl).origin, pairedDevices: config.pairedDeviceIds.length, compiledHelperConfigured: !!config.macHelperPath, enrollmentVerified: false, hardwareVerified: false, clipboardAccessed: false, keychainAccessed: false }));
   } else if (mode === '--enroll') {
     if (!pairingId) throw new Error('An owner-issued pairing ID is required');
     const code = await readHiddenInvitationCode();
@@ -41,12 +41,13 @@ if (!['--check', '--start', '--enroll', '--pair-check'].includes(mode) || !confi
     const key = await new KeychainProvider().pairKey(`${config.keychain.pairKeyPrefix}${pairingId}`);
     console.log(JSON.stringify({ deviceId: config.deviceId, pairedDeviceId: pairingId, keyFingerprint: pairKeyFingerprint(key), keyPresent: true, clipboardAccessed: false, networkAccessed: false }));
   } else {
+    if (typeof config.macHelperPath !== 'string') throw new Error('A reviewed compiled macOS helper path is required for live start');
     const keychain = new KeychainProvider();
     const codec = new PairwiseAeadCodec({ deviceId: config.deviceId, keyForPeer: peer => keychain.pairKey(`${config.keychain.pairKeyPrefix}${peer}`) });
     const client = new HttpRelayClient({ deviceId: config.deviceId, baseUrl: config.relayUrl,
       getAuthorization: async () => ({ clientId: await keychain.read(config.keychain.clientIdService), clientSecret: await keychain.read(config.keychain.clientSecretService) }),
       seal: (message, to) => codec.seal(message, to), open: (payload, from) => codec.open(payload, from) });
-    const companion = new NativeCompanion({ deviceId: config.deviceId, clipboard: new MacOSClipboard(), client, state: new FileState(config.statePath), pairedDeviceIds: config.pairedDeviceIds, timeoutMs: 5000 });
+    const companion = new NativeCompanion({ deviceId: config.deviceId, clipboard: new MacOSClipboard({ run: compiledMacRunner(config.macHelperPath) }), client, state: new FileState(config.statePath), pairedDeviceIds: config.pairedDeviceIds, timeoutMs: 5000 });
     const input = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
     const shutdown = () => { companion.stop(); input.close(); };
     process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);

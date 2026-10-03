@@ -19,7 +19,7 @@
 
 ## Manual text-only pilot
 
-- Start each companion only after credentials, Council deployment, fingerprint checks, and explicit local clipboard opt-in are complete. The CLI is manually started; no installer, login item, launch agent, VPN, accessibility permission, keyboard capture, or mouse injection is included. It polls outbound HTTPS; no inbound home/office port is required.
+- Start each companion only after credentials, Council deployment, fingerprint checks, a reviewed compiled macOS clipboard helper in an absolute path, and explicit local clipboard opt-in are complete. The CLI is manually started; no installer, login item, launch agent, VPN, accessibility permission, keyboard capture, or mouse injection is included. It polls outbound HTTPS; no inbound home/office port is required.
 - Use only harmless test strings. Send manually with `send <target-device-id>`. Test one character, multiline, Unicode, and the 65,536-byte UTF-8 limit. Verify the destination's `received`, `applied`, and `verified` states separately; queued frames are not proof of clipboard write. Then test stale revision, target clipboard change, pause, disconnect/reconnect, and denial on both Macs. Record only metadata and test outcome, not clipboard text or secrets.
 - `pause` or `quit` locally stops the companion. Council's owner pause blocks traffic and clears queued frames. For revocation, stop both clients, revoke the device in Council, revoke its Cloudflare service token, remove its Keychain token and pair-key items, and verify old credentials fail. A new key is required before re-pairing.
 

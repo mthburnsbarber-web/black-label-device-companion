@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isAbsolute } from 'node:path';
 import { MAX_BYTES } from '../core.js';
 
 const script = fileURLToPath(new URL('./macos_clipboard.swift', import.meta.url));
@@ -8,9 +9,9 @@ const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
 const error = code => Object.assign(new Error(code), { code });
 
 // Injectable process boundary. No subprocess is started on import or construction.
-export function swiftRunner(args, input = Buffer.alloc(0)) {
+function runProcess(executable, args, input = Buffer.alloc(0)) {
   return new Promise((resolve, reject) => {
-    const child = spawn('swift', [script, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const out = [], err = [];
     child.stdout.on('data', chunk => out.push(chunk));
     child.stderr.on('data', chunk => err.push(chunk));
@@ -18,6 +19,11 @@ export function swiftRunner(args, input = Buffer.alloc(0)) {
     child.on('close', code => resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }));
     child.stdin.end(input);
   });
+}
+export function swiftRunner(args, input) { return runProcess('swift', [script, ...args], input); }
+export function compiledMacRunner(helperPath) {
+  if (typeof helperPath !== 'string' || !isAbsolute(helperPath)) throw error('invalid_helper_path');
+  return (args, input) => runProcess(helperPath, args, input);
 }
 
 export class MacOSClipboard {

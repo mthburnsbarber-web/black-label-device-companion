@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MacOSClipboard } from '../native/macos.js';
+import { MacOSClipboard, compiledMacRunner } from '../native/macos.js';
 import { OutboundCompanionClient } from '../native/outbound.js';
 
 test('macOS adapter is inert until opt-in, then uses injected subprocess only', async () => {
@@ -36,6 +36,11 @@ test('macOS adapter rejects unsupported platform and malformed native responses'
   const bad = new MacOSClipboard({ platform: 'darwin', run: async () => ({ code: 0, stdout: '{"revision":1,"contentBase64":"@@"}' }) });
   bad.activate({ consent: true });
   await assert.rejects(bad.snapshot(), { code: 'invalid_native_response' });
+});
+
+test('compiled macOS helper path is explicit and inert until use', () => {
+  assert.throws(() => compiledMacRunner('./helper'), { code: 'invalid_helper_path' });
+  assert.equal(typeof compiledMacRunner('/private/approved/helper'), 'function');
 });
 
 class FakeSocket {
