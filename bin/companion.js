@@ -7,6 +7,8 @@ import { PairwiseAeadCodec } from '../native/aead_codec.js';
 import { KeychainProvider } from '../native/keychain.js';
 import { FileState } from '../native/state.js';
 import { NativeCompanion } from '../native/companion.js';
+import { CouncilEnrollmentClient } from '../native/council_enrollment.js';
+import { readHiddenInvitationCode } from '../native/secret_prompt.js';
 
 function validate(config) {
   const id = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(value);
@@ -17,15 +19,23 @@ function validate(config) {
   return config;
 }
 
-const [mode, configPath] = process.argv.slice(2);
-if (!['--check', '--start'].includes(mode) || !configPath) {
-  console.log('Usage: node bin/companion.js --check|--start /absolute/path/companion.config.json');
+const [mode, configPath, pairingId] = process.argv.slice(2);
+if (!['--check', '--start', '--enroll'].includes(mode) || !configPath) {
+  console.log('Usage: node bin/companion.js --check|--start /absolute/path/companion.config.json OR --enroll /absolute/path/companion.config.json <pairing-id>');
   process.exitCode = 2;
 } else {
   const config = validate(JSON.parse(await readFile(configPath, 'utf8')));
   if (process.platform !== 'darwin') throw new Error('This build supports macOS only');
   if (mode === '--check') {
-    console.log(JSON.stringify({ configValid: true, deviceId: config.deviceId, relay: new URL(config.relayUrl).origin, pairedDevices: config.pairedDeviceIds.length, clipboardAccessed: false, keychainAccessed: false }));
+    console.log(JSON.stringify({ configValid: true, deviceId: config.deviceId, relay: new URL(config.relayUrl).origin, pairedDevices: config.pairedDeviceIds.length, enrollmentVerified: false, hardwareVerified: false, clipboardAccessed: false, keychainAccessed: false }));
+  } else if (mode === '--enroll') {
+    if (!pairingId) throw new Error('An owner-issued pairing ID is required');
+    const code = await readHiddenInvitationCode();
+    const keychain = new KeychainProvider();
+    const client = new CouncilEnrollmentClient({ relayUrl: config.relayUrl,
+      getAuthorization: async () => ({ clientId: await keychain.read(config.keychain.clientIdService), clientSecret: await keychain.read(config.keychain.clientSecretService) }) });
+    const result = await client.enrollWithCredentialFingerprint({ pairingId, deviceId: config.deviceId, code });
+    console.log(JSON.stringify(result)); // Public comparison fingerprint only; never print credentials or clipboard content.
   } else {
     const keychain = new KeychainProvider();
     const codec = new PairwiseAeadCodec({ deviceId: config.deviceId, keyForPeer: peer => keychain.pairKey(`${config.keychain.pairKeyPrefix}${peer}`) });
