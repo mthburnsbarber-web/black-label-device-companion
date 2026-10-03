@@ -69,6 +69,16 @@ test('target change between prepare and write is preserved', async () => {
   } finally { await r.close(); }
 });
 
+test('native write failure after clipboard empty is never reported as a simple denial', async () => {
+  const r = await rig('harmless');
+  try {
+    r.target.compareAndWrite = () => { throw Object.assign(new Error('write_failed_after_empty'), { code: 'write_failed_after_empty' }); };
+    const result = await r.mini.sendClipboard('laptop', { consent: true });
+    assert.equal(result.receipt.state, 'verification_failed');
+    assert.equal(r.target.snapshot().text, 'prior');
+  } finally { await r.close(); }
+});
+
 test('explicit consent and stop gate all operations', async () => {
   const r = await rig();
   try {

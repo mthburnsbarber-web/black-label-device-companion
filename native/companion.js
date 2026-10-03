@@ -123,7 +123,10 @@ export class NativeCompanion {
       const state = actual.revision === revision && sha(Buffer.from(actual.text, 'utf8')) === e.sha256 ? 'verified' : 'verification_failed';
       await this.sendTerminal(e, state);
     } catch (error) {
-      await this.sendTerminal(e, error.code === 'concurrent_change' ? 'concurrent_change' : 'permission_denied');
+      const outcome = error.code === 'concurrent_change' ? 'concurrent_change'
+        : error.code === 'permission_denied' ? 'permission_denied'
+        : 'verification_failed';
+      await this.sendTerminal(e, outcome);
     }
   }
   async sendTerminal(e, state) {
