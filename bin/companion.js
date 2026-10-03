@@ -7,7 +7,7 @@ import { PairwiseAeadCodec } from '../native/aead_codec.js';
 import { KeychainProvider } from '../native/keychain.js';
 import { FileState } from '../native/state.js';
 import { NativeCompanion } from '../native/companion.js';
-import { CouncilEnrollmentClient } from '../native/council_enrollment.js';
+import { CouncilEnrollmentClient, pairKeyFingerprint } from '../native/council_enrollment.js';
 import { readHiddenInvitationCode } from '../native/secret_prompt.js';
 
 function validate(config) {
@@ -20,8 +20,8 @@ function validate(config) {
 }
 
 const [mode, configPath, pairingId] = process.argv.slice(2);
-if (!['--check', '--start', '--enroll'].includes(mode) || !configPath) {
-  console.log('Usage: node bin/companion.js --check|--start /absolute/path/companion.config.json OR --enroll /absolute/path/companion.config.json <pairing-id>');
+if (!['--check', '--start', '--enroll', '--pair-check'].includes(mode) || !configPath) {
+  console.log('Usage: node bin/companion.js --check|--start <config> OR --enroll <config> <pairing-id> OR --pair-check <config> <paired-device-id>');
   process.exitCode = 2;
 } else {
   const config = validate(JSON.parse(await readFile(configPath, 'utf8')));
@@ -36,6 +36,10 @@ if (!['--check', '--start', '--enroll'].includes(mode) || !configPath) {
       getAuthorization: async () => ({ clientId: await keychain.read(config.keychain.clientIdService), clientSecret: await keychain.read(config.keychain.clientSecretService) }) });
     const result = await client.enrollWithCredentialFingerprint({ pairingId, deviceId: config.deviceId, code });
     console.log(JSON.stringify(result)); // Public comparison fingerprint only; never print credentials or clipboard content.
+  } else if (mode === '--pair-check') {
+    if (!config.pairedDeviceIds.includes(pairingId)) throw new Error('Device is not in the configured pair list');
+    const key = await new KeychainProvider().pairKey(`${config.keychain.pairKeyPrefix}${pairingId}`);
+    console.log(JSON.stringify({ deviceId: config.deviceId, pairedDeviceId: pairingId, keyFingerprint: pairKeyFingerprint(key), keyPresent: true, clipboardAccessed: false, networkAccessed: false }));
   } else {
     const keychain = new KeychainProvider();
     const codec = new PairwiseAeadCodec({ deviceId: config.deviceId, keyForPeer: peer => keychain.pairKey(`${config.keychain.pairKeyPrefix}${peer}`) });
