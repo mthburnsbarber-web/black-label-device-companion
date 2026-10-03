@@ -55,3 +55,6 @@ For keyboard/mouse sharing, favor evaluating the maintained [Deskflow project](h
 4. Only after those tests, connect the dashboard Devices UI to the versioned control/status API. Label offline, pending, received, applied, verified, and ambiguous outcomes distinctly.
 
 The current reported paste failure (`s`) is being handled separately. These mock tests do not establish its root cause or fix it on real devices.
+# Council integration status
+
+The native HTTP client speaks Council's undeployed device relay wire format (`/health` and `/frames`). `native/council_enrollment.js` adds a source-compatible device enrollment request (`/enroll`) that returns only `pending_owner_approval`; it never self-approves pairing. Council's Worker is the intended backend. The standalone `cloud/` implementation in this repository is retained as an inactive reference and should not be deployed as a second backend. No actual credentials, devices, clipboard contents, or Cloudflare resources have been used.
