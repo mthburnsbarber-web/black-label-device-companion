@@ -1,0 +1,14 @@
+{
+  "name": "black-label-device-relay",
+  "main": "./relay_worker.js",
+  "compatibility_date": "2026-10-03",
+  "workers_dev": false,
+  "preview_urls": false,
+  "triggers": { "crons": ["0 * * * *"] },
+  "d1_databases": [{ "binding": "RELAY_DB", "database_name": "black-label-device-relay", "database_id": "REPLACE_AFTER_APPROVED_CREATION" }],
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "REPLACE_WITH_APPROVED_TEAM_DOMAIN",
+    "DEVICE_AUDIENCES_JSON": "{\"device-mini\":\"REPLACE_WITH_DEVICE_MINI_ACCESS_AUD\",\"device-laptop\":\"REPLACE_WITH_DEVICE_LAPTOP_ACCESS_AUD\"}",
+    "PAIRED_DEVICES_JSON": "{\"device-mini\":[\"device-laptop\"],\"device-laptop\":[\"device-mini\"]}"
+  }
+}
