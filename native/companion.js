@@ -11,22 +11,29 @@ export class NativeCompanion {
   constructor({ deviceId, clipboard, client, state, pairedDeviceIds = [], timeoutMs = 500, maxAttempts = 3, now = Date.now }) {
     this.deviceId = deviceId; this.clipboard = clipboard; this.client = client; this.state = state;
     this.paired = new Set(pairedDeviceIds); this.timeoutMs = timeoutMs; this.maxAttempts = maxAttempts; this.now = now;
-    this.enabled = false; this.waiters = new Map(); this.queue = Promise.resolve();
+    this.enabled = false; this.draining = false; this.stopPromise = null; this.waiters = new Map(); this.queue = Promise.resolve();
   }
-  status() { return { deviceId: this.deviceId, enabled: this.enabled, connected: this.client.status().connected, capabilities: ['clipboard_text'], pairedDeviceIds: [...this.paired] }; }
+  status() { return { deviceId: this.deviceId, enabled: this.enabled, draining: this.draining, connected: this.client.status().connected, capabilities: ['clipboard_text'], pairedDeviceIds: [...this.paired] }; }
   async start({ consent } = {}) {
     if (consent !== true) throw fail('consent_required');
+    if (this.stopPromise) await this.stopPromise;
     if (this.enabled) throw fail('already_started');
     await this.state.load();
     this.clipboard.activate?.({ consent: true });
     this.enabled = true;
     try { await this.client.start({ consent: true, onMessage: event => this.onMessage(event) }); }
-    catch (error) { this.stop(); throw error; }
+    catch (error) { await this.stop(); throw error; }
   }
   stop() {
-    this.enabled = false; this.client.stop(); this.clipboard.pause?.();
+    if (this.stopPromise) return this.stopPromise;
+    this.enabled = false; this.draining = true;
     for (const pending of this.waiters.values()) pending.reject(fail('stopped'));
     this.waiters.clear();
+    const active = this.queue;
+    this.stopPromise = active.catch(() => {}).then(() => {
+      this.client.stop(); this.clipboard.pause?.(); this.draining = false; this.stopPromise = null;
+    });
+    return this.stopPromise;
   }
   async reconnect() {
     if (!this.enabled) throw fail('paused');
@@ -53,6 +60,7 @@ export class NativeCompanion {
     const bytes = Buffer.from(source.text, 'utf8');
     if (!bytes.length || bytes.length > MAX_BYTES) throw fail('invalid_size');
     const prepared = await this.sendAndWait({ type: 'prepare', id: requestId, sourceDeviceId: this.deviceId, targetDeviceId }, 'prepared');
+    if (!this.enabled) throw fail('stopped');
     if (!Number.isSafeInteger(prepared.targetRevision)) throw fail('invalid_prepare');
     const current = await this.clipboard.snapshot();
     if (current.revision !== source.revision || current.text !== source.text) throw fail('stale_source');
@@ -61,6 +69,7 @@ export class NativeCompanion {
     const transfer = { type: 'transfer', id: requestId, sourceDeviceId: this.deviceId, targetDeviceId, envelope, contentBase64: bytes.toString('base64') };
     let lastError;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      if (!this.enabled) throw fail('stopped');
       if (this.now() > envelope.expiresAt) throw fail('expired');
       try {
         const receipt = await this.sendAndWait(transfer, 'receipt');
@@ -69,7 +78,7 @@ export class NativeCompanion {
         return { envelope, receipt, attempts: attempt };
       } catch (error) {
         lastError = error;
-        if (!['timeout', 'offline'].includes(error.code)) throw error;
+        if (!['timeout', 'offline', 'invalid_relay_response'].includes(error.code)) throw error;
       }
     }
     throw lastError;
@@ -84,8 +93,9 @@ export class NativeCompanion {
       if (waiter?.expected === message.type && (message.type !== 'receipt' || terminal.has(message.state))) waiter.resolve(message);
       return;
     }
-    this.queue = this.queue.then(() => this.handleInbound(event.authenticatedPeerId, message)).catch(() => {});
-    await this.queue;
+    const work = this.queue.then(() => this.handleInbound(event.authenticatedPeerId, message));
+    this.queue = work.catch(() => {}); // Later frames can still be processed.
+    await work; // The relay must not ACK a frame whose handling failed.
   }
   async handleInbound(peerId, message) {
     if (!this.enabled) return;
@@ -117,19 +127,26 @@ export class NativeCompanion {
     try { text = validatePayload(bytes, e); } catch { await this.sendTerminal(e, 'invalid_payload'); return; }
     await this.state.update(next => { next.inbound[e.id] = { sourceDeviceId: peerId, sequence: e.sequence, sha256: e.sha256 }; next.lastSequence[peerId] = e.sequence; });
     await this.client.send({ type: 'receipt', id: e.id, sourceDeviceId: peerId, targetDeviceId: this.deviceId, state: 'received', byteLength: e.byteLength });
-    if (!this.enabled) { await this.sendTerminal(e, 'paused').catch(() => {}); return; }
+    if (!this.enabled) { await this.sendTerminal(e, 'paused'); return; }
+    let revision;
     try {
-      const revision = await this.clipboard.compareAndWrite(e.targetRevision, text, { transferId: e.id, sourceDeviceId: peerId });
-      await this.client.send({ type: 'receipt', id: e.id, sourceDeviceId: peerId, targetDeviceId: this.deviceId, state: 'applied', byteLength: e.byteLength });
-      const actual = await this.clipboard.snapshot();
-      const state = actual.revision === revision && sha(Buffer.from(actual.text, 'utf8')) === e.sha256 ? 'verified' : 'verification_failed';
-      await this.sendTerminal(e, state);
+      revision = await this.clipboard.compareAndWrite(e.targetRevision, text, { transferId: e.id, sourceDeviceId: peerId });
     } catch (error) {
       const outcome = error.code === 'concurrent_change' ? 'concurrent_change'
         : error.code === 'permission_denied' ? 'permission_denied'
         : 'verification_failed';
       await this.sendTerminal(e, outcome);
+      return;
     }
+    // A lost intermediate receipt must not prevent native readback or rewrite
+    // a durable verified receipt as a failure of the clipboard itself.
+    await this.client.send({ type: 'receipt', id: e.id, sourceDeviceId: peerId, targetDeviceId: this.deviceId, state: 'applied', byteLength: e.byteLength }).catch(() => {});
+    let state = 'verification_failed';
+    try {
+      const actual = await this.clipboard.snapshot();
+      if (actual.revision === revision && sha(Buffer.from(actual.text, 'utf8')) === e.sha256) state = 'verified';
+    } catch { /* Write may have happened; report unverified rather than denied. */ }
+    await this.sendTerminal(e, state);
   }
   async sendTerminal(e, state) {
     if (!terminal.has(state)) throw fail('invalid_state');

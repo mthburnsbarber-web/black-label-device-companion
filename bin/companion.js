@@ -49,21 +49,21 @@ if (!['--check', '--start', '--enroll', '--pair-check'].includes(mode) || !confi
       seal: (message, to) => codec.seal(message, to), open: (payload, from) => codec.open(payload, from) });
     const companion = new NativeCompanion({ deviceId: config.deviceId, clipboard: new MacOSClipboard({ run: compiledMacRunner(config.macHelperPath) }), client, state: new FileState(config.statePath), pairedDeviceIds: config.pairedDeviceIds, timeoutMs: 5000 });
     const input = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-    const shutdown = () => { companion.stop(); input.close(); };
-    process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
+    const shutdown = async () => { await companion.stop(); input.close(); };
+    process.once('SIGINT', () => { void shutdown(); }); process.once('SIGTERM', () => { void shutdown(); });
     await companion.start({ consent: true });
     console.log('Companion enabled. Commands: status, send <device-id>, pause, resume, quit. Clipboard content is never printed.');
     for await (const line of input) {
       const [command, target] = line.trim().split(/\s+/);
       try {
-        if (command === 'quit') { shutdown(); break; }
-        if (command === 'pause') { companion.stop(); console.log('Paused.'); continue; }
+        if (command === 'quit') { await shutdown(); break; }
+        if (command === 'pause') { await companion.stop(); console.log('Paused after in-flight transfer settled.'); continue; }
         if (command === 'resume') { await companion.start({ consent: true }); console.log('Enabled.'); continue; }
         if (command === 'status') { console.log(JSON.stringify(companion.status())); continue; }
         if (command === 'send') { const result = await companion.sendClipboard(target, { consent: true }); console.log(JSON.stringify({ transferId: result.envelope.id, state: result.receipt.state, attempts: result.attempts })); continue; }
         console.log('Commands: status, send <device-id>, pause, resume, quit');
       } catch (error) { console.error(`Operation failed: ${error.code || error.message}`); }
     }
-    shutdown();
+    await shutdown();
   }
 }

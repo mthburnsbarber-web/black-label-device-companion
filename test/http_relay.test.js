@@ -31,7 +31,7 @@ test('two companions transfer exact Unicode text over real loopback HTTP sockets
     assert.equal(target.writes, 1);
     assert.equal(mini.status().connected, true);
     assert.equal(JSON.stringify([...relay.messages.values()]).includes('雪'), false);
-  } finally { mini.stop(); laptop.stop(); await relay.stop(); await rm(dir, { recursive: true, force: true }); }
+  } finally { await Promise.all([mini.stop(), laptop.stop()]); await relay.stop(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test('relay rejects wrong token and non-loopback plaintext endpoints', { skip: !process.env.RUN_LOOPBACK }, async () => {
@@ -53,4 +53,67 @@ test('HTTPS client sends Cloudflare service-token headers supplied by credential
     assert.equal(headers['CF-Access-Client-Secret'], 'test-secret');
     assert.equal(headers.authorization, undefined);
   } finally { client.stop(); }
+});
+
+test('transport ACK follows processing and retries after ACK loss without reapplying', async () => {
+  let handled = 0, ackCalls = 0;
+  const urls = [];
+  const fetcher = async (url) => {
+    urls.push(url);
+    if (url.endsWith('/health')) return new Response(JSON.stringify({ ok: true }));
+    if (url.includes('/ack')) return new Response(JSON.stringify({ ok: true }), { status: ++ackCalls === 1 ? 503 : 200 });
+    if (url.endsWith('after=0')) return new Response(JSON.stringify({ frames: [{ seq: 7, from: 'laptop', payload: 'encrypted', expiresAt: Date.now() + 10000 }] }));
+    return new Response(JSON.stringify({ frames: [] }));
+  };
+  const client = new HttpRelayClient({ deviceId: 'mini', baseUrl: 'https://relay.example.test', getAuthorization: async () => 'test', seal: async () => 'encrypted', open: async () => ({ type: 'receipt' }), fetcher, pollMs: 100000 });
+  try {
+    await client.start({ consent: true, onMessage: async () => { handled++; } });
+    await assert.rejects(client.poll(), { code: 'transport_ack_failed' });
+    assert.equal(handled, 1);
+    assert.equal(client.status().pendingTransportAcks, 1);
+    assert.equal(client.status().lastTransportAckSeq, 0);
+    await client.poll();
+    assert.equal(handled, 1);
+    assert.equal(client.status().pendingTransportAcks, 0);
+    assert.equal(client.status().lastTransportAckSeq, 7);
+    assert.equal(ackCalls, 2);
+    assert.ok(urls.indexOf('https://relay.example.test/frames/7/ack') > urls.indexOf('https://relay.example.test/frames?after=0'));
+  } finally { client.stop(); }
+});
+
+test('failed frame processing does not advance cursor or transport ACK', async () => {
+  let ackCalls = 0, handled = 0;
+  const fetcher = async url => url.endsWith('/health') ? new Response('{}')
+    : url.includes('/ack') ? (ackCalls++, new Response('{}'))
+    : new Response(JSON.stringify({ frames: [{ seq: 2, from: 'laptop', payload: 'encrypted' }] }));
+  const client = new HttpRelayClient({ deviceId: 'mini', baseUrl: 'https://relay.example.test', getAuthorization: async () => 'test', seal: async () => 'encrypted', open: async () => ({}), fetcher, pollMs: 100000 });
+  try {
+    await client.start({ consent: true, onMessage: async () => { handled++; if (handled === 1) throw Error('durability failure'); } });
+    await assert.rejects(client.poll(), /durability failure/);
+    assert.equal(client.cursor, 0);
+    assert.equal(ackCalls, 0);
+    await client.poll();
+    assert.equal(handled, 2);
+    assert.equal(client.cursor, 2);
+    assert.equal(ackCalls, 1);
+  } finally { client.stop(); }
+});
+
+test('relay enqueue response is queued, never an application verification', async () => {
+  const client = new HttpRelayClient({ deviceId: 'mini', baseUrl: 'https://relay.example.test', getAuthorization: async () => 'test', seal: async () => 'encrypted', open: async () => ({}), pollMs: 100000,
+    fetcher: async (url, options) => url.endsWith('/health') ? new Response('{}')
+      : options?.method === 'POST' ? new Response('{"seq":9}', { status: 202 })
+      : new Response('{"frames":[]}') });
+  try {
+    await client.start({ consent: true });
+    assert.deepEqual(await client.send({ type: 'prepare', targetDeviceId: 'laptop' }), { state: 'queued', seq: 9 });
+    assert.equal(client.status().lastTransportAckSeq, 0);
+  } finally { client.stop(); }
+});
+
+test('network request timeout is bounded for an unresponsive relay', async () => {
+  const client = new HttpRelayClient({ deviceId: 'mini', baseUrl: 'https://relay.example.test', getAuthorization: async () => 'test', seal: async () => 'encrypted', open: async () => ({}), requestTimeoutMs: 5,
+    fetcher: async (_url, options) => new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(new Error('timeout'), { code: 'timeout' })))) });
+  await assert.rejects(client.start({ consent: true }), { code: 'timeout' });
+  assert.equal(client.status().enabled, false);
 });

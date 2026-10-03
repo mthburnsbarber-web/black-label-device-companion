@@ -8,7 +8,7 @@ const json = (response, status, value) => { response.writeHead(status, { 'conten
 
 // Loopback-only integration harness. Not a production identity or cloud service.
 export class LoopbackHttpRelay {
-  constructor(tokenByDevice) { this.tokens = new Map(Object.entries(tokenByDevice)); this.messages = new Map(); this.sequence = 0; this.server = null; }
+  constructor(tokenByDevice) { this.tokens = new Map(Object.entries(tokenByDevice)); this.messages = new Map(); this.acknowledged = new Set(); this.sequence = 0; this.server = null; }
   authenticate(request) {
     const id = request.headers['x-device-id'];
     const expected = this.tokens.get(id);
@@ -30,6 +30,14 @@ export class LoopbackHttpRelay {
         const now = Date.now();
         const frames = (this.messages.get(deviceId) || []).filter(x => x.seq > after && x.expiresAt > now).slice(0, 100);
         return json(response, 200, { frames });
+      }
+      const ack = url.pathname.match(/^\/frames\/([1-9][0-9]*)\/ack$/);
+      if (request.method === 'POST' && ack) {
+        const seq = Number(ack[1]);
+        const owned = (this.messages.get(deviceId) || []).some(frame => frame.seq === seq);
+        if (!owned) return json(response, 404, { error: 'unknown_frame' });
+        this.acknowledged.add(seq);
+        return json(response, 200, { ok: true });
       }
       if (request.method === 'POST' && url.pathname === '/frames') {
         let size = 0, chunks = [];
@@ -55,15 +63,15 @@ export class LoopbackHttpRelay {
 }
 
 export class HttpRelayClient {
-  constructor({ deviceId, baseUrl, getAuthorization, seal, open, fetcher = fetch, pollMs = 1000, allowLoopback = false }) {
+  constructor({ deviceId, baseUrl, getAuthorization, seal, open, fetcher = fetch, pollMs = 1000, requestTimeoutMs = 5000, allowLoopback = false }) {
     const url = new URL(baseUrl);
     const loopback = url.protocol === 'http:' && url.hostname === '127.0.0.1';
-    if (!validId(deviceId) || !(url.protocol === 'https:' || (allowLoopback && loopback)) || url.username || url.password || typeof getAuthorization !== 'function' || typeof seal !== 'function' || typeof open !== 'function') throw fail('invalid_configuration');
+    if (!validId(deviceId) || !(url.protocol === 'https:' || (allowLoopback && loopback)) || url.username || url.password || typeof getAuthorization !== 'function' || typeof seal !== 'function' || typeof open !== 'function' || !Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 30000) throw fail('invalid_configuration');
     this.deviceId = deviceId; this.baseUrl = url.toString().replace(/\/$/, ''); this.getAuthorization = getAuthorization;
-    this.seal = seal; this.open = open; this.fetcher = fetcher; this.pollMs = pollMs;
-    this.enabled = false; this.connected = false; this.cursor = 0; this.timer = null; this.onMessage = null; this.authorization = null;
+    this.seal = seal; this.open = open; this.fetcher = fetcher; this.pollMs = pollMs; this.requestTimeoutMs = requestTimeoutMs;
+    this.enabled = false; this.connected = false; this.cursor = 0; this.lastTransportAckSeq = 0; this.pendingAcks = new Set(); this.timer = null; this.onMessage = null; this.authorization = null;
   }
-  status() { return { connected: this.connected, enabled: this.enabled, deviceId: this.deviceId }; }
+  status() { return { connected: this.connected, enabled: this.enabled, deviceId: this.deviceId, lastTransportAckSeq: this.lastTransportAckSeq, pendingTransportAcks: this.pendingAcks.size }; }
   headers() {
     const identity = typeof this.authorization === 'string'
       ? { authorization: `Bearer ${this.authorization}` }
@@ -77,7 +85,9 @@ export class HttpRelayClient {
     const authorization = await this.getAuthorization(this.deviceId);
     if (!(typeof authorization === 'string' && authorization) && !(authorization && typeof authorization.clientId === 'string' && authorization.clientId && typeof authorization.clientSecret === 'string' && authorization.clientSecret)) throw fail('pairing_required');
     this.authorization = authorization;
-    const response = await this.fetcher(`${this.baseUrl}/health`, { headers: this.headers() });
+    let response;
+    try { response = await this.fetcher(`${this.baseUrl}/health`, { headers: this.headers(), signal: AbortSignal.timeout(this.requestTimeoutMs) }); }
+    catch (error) { this.authorization = null; throw error; }
     if (!response.ok) { this.authorization = null; throw fail('unauthorized'); }
     this.enabled = true; this.connected = true; this.onMessage = onMessage;
     this.schedule();
@@ -88,7 +98,8 @@ export class HttpRelayClient {
   }
   async poll() {
     if (!this.enabled) return;
-    const response = await this.fetcher(`${this.baseUrl}/frames?after=${this.cursor}`, { headers: this.headers() });
+    for (const seq of [...this.pendingAcks].sort((a, b) => a - b)) await this.acknowledge(seq);
+    const response = await this.fetcher(`${this.baseUrl}/frames?after=${this.cursor}`, { headers: this.headers(), signal: AbortSignal.timeout(this.requestTimeoutMs) });
     if (!response.ok) throw fail('offline');
     this.connected = true;
     const body = await response.json();
@@ -97,7 +108,15 @@ export class HttpRelayClient {
       const message = await this.open(frame.payload, frame.from);
       await this.onMessage?.({ authenticatedPeerId: frame.from, message });
       this.cursor = frame.seq;
+      this.pendingAcks.add(frame.seq);
+      await this.acknowledge(frame.seq);
     }
+  }
+  async acknowledge(seq) {
+    const response = await this.fetcher(`${this.baseUrl}/frames/${seq}/ack`, { method: 'POST', headers: this.headers(), signal: AbortSignal.timeout(this.requestTimeoutMs) });
+    if (!response.ok) throw fail('transport_ack_failed');
+    this.pendingAcks.delete(seq);
+    this.lastTransportAckSeq = Math.max(this.lastTransportAckSeq, seq);
   }
   async send(message) {
     if (!this.enabled || !this.connected) throw fail('offline');
@@ -105,8 +124,14 @@ export class HttpRelayClient {
     if (!validId(to) || to === this.deviceId) throw fail('invalid_target');
     const payload = await this.seal(message, to);
     if (typeof payload !== 'string' || !payload) throw fail('encryption_failed');
-    const response = await this.fetcher(`${this.baseUrl}/frames`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ to, payload, expiresAt: Date.now() + 30_000 }) });
+    let response;
+    try { response = await this.fetcher(`${this.baseUrl}/frames`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ to, payload, expiresAt: Date.now() + 30_000 }), signal: AbortSignal.timeout(this.requestTimeoutMs) }); }
+    catch { this.connected = false; throw fail('offline'); }
     if (!response.ok) { this.connected = false; throw fail('offline'); }
+    let body;
+    try { body = await response.json(); } catch { throw fail('invalid_relay_response'); }
+    if (response.status !== 202 || !Number.isSafeInteger(body.seq) || body.seq < 1) throw fail('invalid_relay_response');
+    return { state: 'queued', seq: body.seq };
   }
   stop() { this.enabled = false; this.connected = false; this.onMessage = null; this.authorization = null; clearTimeout(this.timer); this.timer = null; }
 }

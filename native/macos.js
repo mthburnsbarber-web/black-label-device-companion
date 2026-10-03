@@ -13,10 +13,13 @@ function runProcess(executable, args, input = Buffer.alloc(0)) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const out = [], err = [];
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 10_000);
     child.stdout.on('data', chunk => out.push(chunk));
     child.stderr.on('data', chunk => err.push(chunk));
-    child.on('error', reject);
-    child.on('close', code => resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }));
+    child.on('error', cause => { clearTimeout(timer); reject(cause); });
+    child.on('close', code => { clearTimeout(timer); if (timedOut) reject(error('native_helper_timeout')); else resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }); });
+    child.stdin.on('error', () => {});
     child.stdin.end(input);
   });
 }

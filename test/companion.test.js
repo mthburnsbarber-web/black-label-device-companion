@@ -15,7 +15,7 @@ async function rig(text = 'line\n雪 🙂') {
   const mini = new NativeCompanion({ deviceId: 'mini', clipboard: source, client: a, state: new FileState(join(dir, 'mini.json')), pairedDeviceIds: ['laptop'], timeoutMs: 20 });
   const laptop = new NativeCompanion({ deviceId: 'laptop', clipboard: target, client: b, state: new FileState(join(dir, 'laptop.json')), pairedDeviceIds: ['mini'], timeoutMs: 20 });
   await mini.start({ consent: true }); await laptop.start({ consent: true });
-  return { dir, mini, laptop, source, target, a, b, close: async () => { mini.stop(); laptop.stop(); await rm(dir, { recursive: true, force: true }); } };
+  return { dir, mini, laptop, source, target, a, b, close: async () => { await Promise.all([mini.stop(), laptop.stop()]); await rm(dir, { recursive: true, force: true }); } };
 }
 
 test('assembled companions transfer and verify Unicode through memory relay only', async () => {
@@ -36,14 +36,14 @@ test('restart preserves receipt and sequence metadata without clipboard content'
   const r = await rig('private marker');
   try {
     const result = await r.mini.sendClipboard('laptop', { consent: true });
-    r.laptop.stop();
+    await r.laptop.stop();
     const replacement = new NativeCompanion({ deviceId: 'laptop', clipboard: r.target, client: r.b, state: new FileState(join(r.dir, 'laptop.json')), pairedDeviceIds: ['mini'] });
     await replacement.start({ consent: true });
     const persisted = JSON.parse(await readFile(join(r.dir, 'laptop.json'), 'utf8'));
     assert.equal(persisted.lastSequence.mini, result.envelope.sequence);
     assert.equal(persisted.receipts[result.envelope.id].state, 'verified');
     assert.equal(JSON.stringify(persisted).includes('private marker'), false);
-    replacement.stop();
+    await replacement.stop();
   } finally { await r.close(); }
 });
 
@@ -55,6 +55,22 @@ test('lost final ACK retries same ID; durable receipt prevents second write', as
     assert.equal(result.attempts, 2);
     assert.equal(result.receipt.duplicate, true);
     assert.equal(r.target.writes, 1);
+  } finally { await r.close(); }
+});
+
+test('lost applied receipt still produces verified readback and terminal receipt', async () => {
+  const r = await rig('harmless');
+  try {
+    const original = r.b.send.bind(r.b);
+    r.b.send = async message => {
+      if (message.state === 'applied') throw Object.assign(new Error('offline'), { code: 'offline' });
+      return original(message);
+    };
+    const result = await r.mini.sendClipboard('laptop', { consent: true });
+    assert.equal(result.receipt.state, 'verified');
+    assert.equal(r.target.writes, 1);
+    const persisted = JSON.parse(await readFile(join(r.dir, 'laptop.json'), 'utf8'));
+    assert.equal(persisted.receipts[result.envelope.id].state, 'verified');
   } finally { await r.close(); }
 });
 
@@ -84,10 +100,11 @@ test('pausing after received ACK prevents a queued native clipboard write', asyn
   try {
     const original = r.b.send.bind(r.b);
     r.b.send = async message => {
-      if (message.state === 'received') { r.laptop.stop(); return; }
+      if (message.state === 'received') { void r.laptop.stop(); return; }
       return original(message);
     };
-    await assert.rejects(r.mini.sendClipboard('laptop', { consent: true, requestId: 'paused-test' }));
+    const result = await r.mini.sendClipboard('laptop', { consent: true, requestId: 'paused-test' });
+    assert.equal(result.receipt.state, 'paused');
     assert.equal(r.target.writes, 0);
     assert.equal(r.target.snapshot().text, 'prior');
     const persisted = JSON.parse(await readFile(join(r.dir, 'laptop.json'), 'utf8'));
@@ -95,11 +112,61 @@ test('pausing after received ACK prevents a queued native clipboard write', asyn
   } finally { await r.close(); }
 });
 
+test('pause drains an already launched clipboard write and preserves its verified outcome', async () => {
+  const r = await rig('harmless');
+  try {
+    let launched;
+    const started = new Promise(resolve => { launched = resolve; });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const original = r.target.compareAndWrite.bind(r.target);
+    r.target.compareAndWrite = async (...args) => { launched(); await gate; return original(...args); };
+    const sending = r.mini.sendClipboard('laptop', { consent: true });
+    await started;
+    const stopping = r.laptop.stop();
+    assert.equal(r.laptop.status().draining, true);
+    assert.equal(r.b.status().connected, true);
+    assert.equal(r.target.writes, 0);
+    release();
+    const result = await sending;
+    await stopping;
+    assert.equal(result.receipt.state, 'verified');
+    assert.equal(r.target.writes, 1);
+    assert.equal(r.target.snapshot().text, 'harmless');
+    assert.equal(r.laptop.status().draining, false);
+    assert.equal(r.b.status().connected, false);
+  } finally { await r.close(); }
+});
+
+test('helper timeout after a possible write is reported unverified when pause drains', async () => {
+  const r = await rig('harmless');
+  try {
+    let launched;
+    const started = new Promise(resolve => { launched = resolve; });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const original = r.target.compareAndWrite.bind(r.target);
+    r.target.compareAndWrite = async (...args) => {
+      launched(); await gate; original(...args);
+      throw Object.assign(new Error('native_helper_timeout'), { code: 'native_helper_timeout' });
+    };
+    const sending = r.mini.sendClipboard('laptop', { consent: true });
+    await started;
+    const stopping = r.laptop.stop();
+    release();
+    const result = await sending;
+    await stopping;
+    assert.equal(result.receipt.state, 'verification_failed');
+    assert.equal(r.target.writes, 1); // Timed-out subprocess may already have written.
+    assert.equal(r.laptop.status().draining, false);
+  } finally { await r.close(); }
+});
+
 test('explicit consent and stop gate all operations', async () => {
   const r = await rig();
   try {
     await assert.rejects(r.mini.sendClipboard('laptop'), { code: 'consent_required' });
-    r.mini.stop();
+    await r.mini.stop();
     await assert.rejects(r.mini.sendClipboard('laptop', { consent: true }), { code: 'paused' });
     assert.equal(r.a.connected, false);
   } finally { await r.close(); }
