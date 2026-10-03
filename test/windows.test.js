@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WindowsClipboard, windowsRunner } from '../native/windows.js';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 test('Windows adapter stays inert until explicit opt-in and preserves exact text', async () => {
   const calls = [];
@@ -45,4 +47,30 @@ test('Windows adapter surfaces native denial without mutating in JavaScript', as
   clipboard.activate({ consent: true });
   await assert.rejects(clipboard.snapshot(), { code: 'permission_denied' });
   await assert.rejects(clipboard.compareAndWrite(1, 'x'), { code: 'permission_denied' });
+});
+
+test('Windows runner terminates an injected hung helper on abort', async () => {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  let killed = null;
+  child.kill = signal => { killed = signal; queueMicrotask(() => child.emit('close', null)); return true; };
+  const run = windowsRunner('C:\\approved\\ClipboardHelper.exe', { spawnProcess: () => child });
+  const controller = new AbortController();
+  const pending = run(['write', '1'], Buffer.from('text'), controller.signal);
+  controller.abort();
+  await assert.rejects(pending, { code: 'native_helper_timeout' });
+  assert.equal(killed, 'SIGKILL');
+});
+
+test('Windows adapter bounds an injected unresponsive helper and preserves uncertainty', async () => {
+  let signal;
+  const clipboard = new WindowsClipboard({ platform: 'win32', helperTimeoutMs: 5, run: async (_args, _input, givenSignal) => {
+    signal = givenSignal;
+    return new Promise(() => {});
+  } });
+  clipboard.activate({ consent: true });
+  await assert.rejects(clipboard.compareAndWrite(1, 'harmless'), { code: 'native_helper_timeout' });
+  assert.equal(signal.aborted, true);
+  clipboard.pause();
+  assert.equal(clipboard.capabilities().enabled, false);
 });

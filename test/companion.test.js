@@ -8,6 +8,7 @@ import { FileState } from '../native/state.js';
 import { NativeCompanion } from '../native/companion.js';
 import { memoryRelayPair } from '../native/memory_relay.js';
 import { MacOSClipboard } from '../native/macos.js';
+import { WindowsClipboard } from '../native/windows.js';
 
 async function rig(text = 'line\n雪 🙂') {
   const dir = await mkdtemp(join(tmpdir(), 'blacklabel-companion-'));
@@ -172,6 +173,28 @@ test('pause drain ends after an unresponsive native helper without claiming no w
       if (args[0] === 'read') return { code: 0, stdout: JSON.stringify({ revision: 1, contentBase64: Buffer.from('prior').toString('base64') }) };
       launched();
       return new Promise(() => {}); // Injected hung process; real runner kills on abort.
+    } });
+    adapter.activate({ consent: true });
+    r.laptop.clipboard = adapter;
+    const sending = r.mini.sendClipboard('laptop', { consent: true });
+    await started;
+    const stopping = r.laptop.stop();
+    const result = await sending;
+    await stopping;
+    assert.equal(result.receipt.state, 'verification_failed');
+    assert.equal(r.laptop.status().draining, false);
+    assert.equal(adapter.capabilities().enabled, false);
+  } finally { await r.close(); }
+});
+
+test('Windows helper timeout also allows pause drain with an unverified receipt', async () => {
+  const r = await rig('harmless');
+  try {
+    let launched;
+    const started = new Promise(resolve => { launched = resolve; });
+    const adapter = new WindowsClipboard({ platform: 'win32', helperTimeoutMs: 5, run: async args => {
+      if (args[0] === 'read') return { code: 0, stdout: JSON.stringify({ revision: 1, contentBase64: Buffer.from('prior').toString('base64') }) };
+      launched(); return new Promise(() => {});
     } });
     adapter.activate({ consent: true });
     r.laptop.clipboard = adapter;

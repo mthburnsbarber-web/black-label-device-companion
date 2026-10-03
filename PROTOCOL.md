@@ -27,6 +27,8 @@ Recipient messages are separate encrypted application ACKs: `received` after int
 
 Pause immediately rejects new sends and inbound writes not yet launched. If a native compare-and-write subprocess has already launched, `stop()` **drains** it and its readback/receipt before closing the client or reporting paused. The macOS adapter enforces a 10-second timeout even for an unresponsive helper; the compiled runner kills its subprocess on abort. HTTP calls have a 5-second abort timeout. Helper timeout yields `verification_failed` because a clipboard change may already have occurred. A lost intermediate `applied` receipt does not prevent local readback or downgrade a persisted `verified` result. The CLI awaits drain before printing “Paused.” A direct process kill or power loss can still leave an ambiguous state; recovery uses persisted receipt markers and must not claim that pause rolled back a write.
 
+The source-only Windows adapter now applies the same 10-second abort and process-kill policy to its helper. It reports timeout as unverified and lets `stop()` finish draining. This is tested with injected processes and mock clipboards; the Windows helper has not been built or run on Windows and is not part of the MacBook-first pilot.
+
 ## Stages
 
 1. Current: disabled native adapter/client, assembled companion, persistent metadata, in-process relay, and deterministic tests. No real device or Cloudflare connection.
