@@ -6,6 +6,7 @@ Run with Node 24 or later:
 
 ```sh
 npm test
+npm run test:loopback
 npm run demo
 npm run demo:companion
 ```
@@ -18,7 +19,9 @@ npm run demo:companion
 
 `native/outbound.js` requires explicit `start({consent:true})`, a `wss:` relay URL, an externally supplied pairing authorization provider, and externally supplied authenticated encryption/decryption functions. It sends only encrypted application frames after the server authenticates the device. `stop()` closes the connection; the companion exposes an explicit `reconnect()` path. It does **not** implement pairing, cryptography, or a Cloudflare endpoint. Real `MacOSClipboard` and `OutboundCompanionClient` can be injected into `NativeCompanion`, but that combination was **not run**; the real Cloudflare contract is still absent. Windows and Linux native adapters are **unsupported** in this build.
 
-To enable an actual Mac mini trial, the user must approve a signed companion build, its clipboard read/write access under macOS privacy behavior, an exact Cloudflare relay endpoint, per-device pairing and revocation, storage for device keys and durable receipts, retention rules, and a single named test device. The Cloudflare task must provide the account authorization and key enrollment contract, outbound `wss:` relay message schema, authenticated ACK routing, expiry behavior, and a way to query a transfer by ID after reconnection. Only then can the native adapter and client be assembled and run against real devices. Neither Accessibility nor Input Monitoring permission is needed for text clipboard alone; separate keyboard/mouse control would require explicit user-granted OS permission and native implementation.
+`native/http_relay.js` adds an outbound HTTP client and a **127.0.0.1-only** relay server for integration tests. `native/aead_codec.js` encrypts frames with AES-256-GCM using an externally supplied 32-byte key for each device pair, binding source and destination into authenticated data. The code never creates or stores a pairing key. `npm run test:loopback` opens only an ephemeral local listener and verifies two companions exchange encrypted Unicode text, including recipient readback, with mock clipboards. The relay server and its static test tokens are **not** a production cloud service. The normal `npm test` skips the two bind tests because this execution sandbox prohibits even loopback listeners without elevated test permission.
+
+To enable an actual Mac mini trial, the user must approve a signed companion build, its clipboard read/write access under macOS privacy behavior, an exact Cloudflare relay endpoint, per-device pairing and revocation, storage for device keys and durable receipts, retention rules, and a single named test device. The Cloudflare task must provide the account authorization and key enrollment contract, the HTTPS `/health` and `/frames` routes described in [CLOUD-INTEGRATION.md](CLOUD-INTEGRATION.md), authenticated routing, expiry behavior, and a way to query a transfer by ID after reconnection. Only then can the native adapter and client be run against real devices. Neither Accessibility nor Input Monitoring permission is needed for text clipboard alone; separate keyboard/mouse control would require explicit user-granted OS permission and native implementation.
 
 ## Status semantics and limits
 

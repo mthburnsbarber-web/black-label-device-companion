@@ -1,1 +1,1 @@
-{"name":"black-label-device-core-prototype","version":"0.1.0","private":true,"type":"module","engines":{"node":">=24"},"scripts":{"test":"node --test","demo":"node demo.js","demo:companion":"node demo-companion.js"}}
+{"name":"black-label-device-core-prototype","version":"0.1.0","private":true,"type":"module","engines":{"node":">=24"},"scripts":{"test":"node --test","test:loopback":"RUN_LOOPBACK=1 node --test test/http_relay.test.js","demo":"node demo.js","demo:companion":"node demo-companion.js"}}
