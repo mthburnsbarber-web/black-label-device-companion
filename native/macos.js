@@ -9,29 +9,30 @@ const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
 const error = code => Object.assign(new Error(code), { code });
 
 // Injectable process boundary. No subprocess is started on import or construction.
-function runProcess(executable, args, input = Buffer.alloc(0)) {
+function runProcess(executable, args, input = Buffer.alloc(0), signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const out = [], err = [];
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 10_000);
+    const abort = () => child.kill('SIGKILL');
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', chunk => out.push(chunk));
     child.stderr.on('data', chunk => err.push(chunk));
-    child.on('error', cause => { clearTimeout(timer); reject(cause); });
-    child.on('close', code => { clearTimeout(timer); if (timedOut) reject(error('native_helper_timeout')); else resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }); });
+    child.on('error', reject);
+    child.on('close', code => { signal?.removeEventListener('abort', abort); if (signal?.aborted) reject(error('native_helper_timeout')); else resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }); });
     child.stdin.on('error', () => {});
     child.stdin.end(input);
   });
 }
-export function swiftRunner(args, input) { return runProcess('swift', [script, ...args], input); }
+export function swiftRunner(args, input, signal) { return runProcess('swift', [script, ...args], input, signal); }
 export function compiledMacRunner(helperPath) {
   if (typeof helperPath !== 'string' || !isAbsolute(helperPath)) throw error('invalid_helper_path');
-  return (args, input) => runProcess(helperPath, args, input);
+  return (args, input, signal) => runProcess(helperPath, args, input, signal);
 }
 
 export class MacOSClipboard {
-  constructor({ run = swiftRunner, platform = process.platform } = {}) {
-    this.run = run; this.platform = platform; this.enabled = false; this.lastWrite = null;
+  constructor({ run = swiftRunner, platform = process.platform, helperTimeoutMs = 10_000 } = {}) {
+    if (!Number.isSafeInteger(helperTimeoutMs) || helperTimeoutMs < 1 || helperTimeoutMs > 30_000) throw error('invalid_helper_timeout');
+    this.run = run; this.platform = platform; this.helperTimeoutMs = helperTimeoutMs; this.enabled = false; this.lastWrite = null;
   }
   capabilities() { return { clipboardText: this.platform === 'darwin', enabled: this.enabled, inputControl: false }; }
   activate({ consent } = {}) { if (this.platform !== 'darwin') throw error('unsupported_platform'); if (consent !== true) throw error('consent_required'); this.enabled = true; }
@@ -39,7 +40,15 @@ export class MacOSClipboard {
   assertEnabled() { if (!this.enabled) throw error('paused'); }
   async call(args, input) {
     this.assertEnabled();
-    const result = await this.run(args, input);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.helperTimeoutMs);
+    let result;
+    try {
+      result = await Promise.race([
+        this.run(args, input, controller.signal),
+        new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(error('native_helper_timeout')), { once: true })),
+      ]);
+    } finally { clearTimeout(timer); }
     let body;
     try { body = JSON.parse(result.stdout); } catch { throw error(result.code ? 'native_adapter_failed' : 'invalid_native_response'); }
     if (result.code !== 0 || body.error) throw error(body.error || 'native_adapter_failed');

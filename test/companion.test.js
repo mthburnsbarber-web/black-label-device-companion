@@ -7,6 +7,7 @@ import { MockClipboard } from '../core.js';
 import { FileState } from '../native/state.js';
 import { NativeCompanion } from '../native/companion.js';
 import { memoryRelayPair } from '../native/memory_relay.js';
+import { MacOSClipboard } from '../native/macos.js';
 
 async function rig(text = 'line\n雪 🙂') {
   const dir = await mkdtemp(join(tmpdir(), 'blacklabel-companion-'));
@@ -159,6 +160,29 @@ test('helper timeout after a possible write is reported unverified when pause dr
     assert.equal(result.receipt.state, 'verification_failed');
     assert.equal(r.target.writes, 1); // Timed-out subprocess may already have written.
     assert.equal(r.laptop.status().draining, false);
+  } finally { await r.close(); }
+});
+
+test('pause drain ends after an unresponsive native helper without claiming no write', async () => {
+  const r = await rig('harmless');
+  try {
+    let launched;
+    const started = new Promise(resolve => { launched = resolve; });
+    const adapter = new MacOSClipboard({ platform: 'darwin', helperTimeoutMs: 5, run: async args => {
+      if (args[0] === 'read') return { code: 0, stdout: JSON.stringify({ revision: 1, contentBase64: Buffer.from('prior').toString('base64') }) };
+      launched();
+      return new Promise(() => {}); // Injected hung process; real runner kills on abort.
+    } });
+    adapter.activate({ consent: true });
+    r.laptop.clipboard = adapter;
+    const sending = r.mini.sendClipboard('laptop', { consent: true });
+    await started;
+    const stopping = r.laptop.stop();
+    const result = await sending;
+    await stopping;
+    assert.equal(result.receipt.state, 'verification_failed');
+    assert.equal(r.laptop.status().draining, false);
+    assert.equal(adapter.capabilities().enabled, false);
   } finally { await r.close(); }
 });
 

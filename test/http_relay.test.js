@@ -117,3 +117,54 @@ test('network request timeout is bounded for an unresponsive relay', async () =>
   await assert.rejects(client.start({ consent: true }), { code: 'timeout' });
   assert.equal(client.status().enabled, false);
 });
+
+test('pause during GET cannot skip a frame on same-client resume', async () => {
+  let releaseOldGet;
+  const oldGet = new Promise(resolve => { releaseOldGet = resolve; });
+  let gets = 0, delivered = 0, acks = 0;
+  const frame = { seq: 1, from: 'laptop', payload: 'encrypted' };
+  const fetcher = async url => {
+    if (url.endsWith('/health')) return new Response('{}');
+    if (url.endsWith('/ack')) { acks++; return new Response('{}'); }
+    gets++;
+    if (gets === 1) return oldGet;
+    return new Response(JSON.stringify({ frames: [frame] }));
+  };
+  const client = new HttpRelayClient({ deviceId: 'mini', baseUrl: 'https://relay.example.test', getAuthorization: async () => 'test', seal: async () => 'encrypted', open: async () => ({}), fetcher, pollMs: 100000 });
+  try {
+    await client.start({ consent: true, onMessage: async () => { delivered++; } });
+    const stalePoll = client.poll();
+    await new Promise(resolve => setImmediate(resolve));
+    client.stop();
+    await client.start({ consent: true, onMessage: async () => { delivered++; } });
+    releaseOldGet(new Response(JSON.stringify({ frames: [frame] })));
+    await stalePoll;
+    assert.equal(delivered, 0);
+    assert.equal(client.cursor, 0);
+    assert.equal(acks, 0);
+    await client.poll();
+    assert.equal(delivered, 1);
+    assert.equal(client.cursor, 1);
+    assert.equal(acks, 1);
+  } finally { client.stop(); }
+});
+
+test('stop during frame handler preserves replay after restart', async () => {
+  let delivered = 0, acks = 0;
+  const frame = { seq: 1, from: 'laptop', payload: 'encrypted' };
+  const fetcher = async url => url.endsWith('/health') ? new Response('{}')
+    : url.endsWith('/ack') ? (acks++, new Response('{}'))
+    : new Response(JSON.stringify({ frames: [frame] }));
+  const client = new HttpRelayClient({ deviceId: 'mini', baseUrl: 'https://relay.example.test', getAuthorization: async () => 'test', seal: async () => 'encrypted', open: async () => ({}), fetcher, pollMs: 100000 });
+  try {
+    await client.start({ consent: true, onMessage: async () => { delivered++; client.stop(); } });
+    await client.poll();
+    assert.equal(client.cursor, 0);
+    assert.equal(acks, 0);
+    await client.start({ consent: true, onMessage: async () => { delivered++; } });
+    await client.poll();
+    assert.equal(delivered, 2); // Durable application IDs must make replay idempotent.
+    assert.equal(client.cursor, 1);
+    assert.equal(acks, 1);
+  } finally { client.stop(); }
+});
